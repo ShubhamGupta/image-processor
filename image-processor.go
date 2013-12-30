@@ -2,13 +2,18 @@ package main
 
 import (
 	"amqp"
+	"encoding/json"
 	"fmt"
 	"log"
-	"time"
+	"magick"
+	"os"
+	"strings"
+	// "time"
 )
 
 func failOnError(err error, msg string) {
 	if err != nil {
+		// fatal; printf Followed by a call to os.Exit(1)
 		log.Fatalf("%s: %s", msg, err)
 		panic(fmt.Sprintf("%s: %s", msg, err))
 	}
@@ -29,7 +34,7 @@ func NewConsumer(url, exchange, exchange_type, queueName, key, ctag string) (*Co
 	}
 	var err error
 
-	fmt.Println("Trying to Connect")
+	log.Printf("Trying to Connect")
 	c.conn, err = amqp.Dial(url)
 	if err != nil {
 		return nil, fmt.Errorf("Dial: %s", err)
@@ -53,6 +58,7 @@ func NewConsumer(url, exchange, exchange_type, queueName, key, ctag string) (*Co
 	if err = c.channel.QueueBind(queue.Name, key, exchange, false, nil); err != nil {
 		return nil, fmt.Errorf("Queue Bind: %s", err)
 	}
+
 	log.Printf("Queue bound to Exchange, starting Consume (consumer tag %q)", c.tag)
 	deliveries, err := c.channel.Consume(queue.Name, c.tag, false, false, false, false, nil)
 	if err != nil {
@@ -67,16 +73,30 @@ func NewConsumer(url, exchange, exchange_type, queueName, key, ctag string) (*Co
 
 func handle(deliveries <-chan amqp.Delivery) {
 	for d := range deliveries {
-		fmt.Println("Sending for Processing...")
-		go process_msg(d)
-		fmt.Println(time.Now())
+		log.Printf("Cropping the image: %s", d.Body)
+		image_message := []byte(d.Body)
+		var image_attr map[string]string           // Used to hold the image attributes from Recd. JSON
+		json.Unmarshal(image_message, &image_attr) // fetching Json.
+		go process_msg(image_attr)
 	}
-	fmt.Println("Closing the connection")
 }
 
-func process_msg(d amqp.Delivery) {
-	// fmt.Println(d.MessageCount)
-	fmt.Printf("Content: %s", d.Body)
+func process_msg(image_attr map[string]string) {
+	magick_image, err := magick.NewFromFile(image_attr["path"])
+	geometry_string := image_attr["width"] + "x" + image_attr["width"] + "+" + image_attr["crop_x"] + "+" + image_attr["crop_y"]
+	if err == nil {
+		err = magick_image.Crop(geometry_string) //100x200+10+20
+		if err == nil {
+			file_path := strings.Replace(image_attr["path"], "original", geometry_string, 1)
+			dest_path := file_path[0:strings.LastIndex(file_path, "/")]
+			err = os.MkdirAll(dest_path+"/", 0777)
+			magick_image.ToFile(file_path)
+		} else {
+			fmt.Println("ERRORS: %s", err)
+		}
+	} else {
+		log.Printf("Image Magick File Error: %s", err)
+	}
 }
 
 func main() {
@@ -84,7 +104,7 @@ func main() {
 		c   *Consumer
 		err error
 	)
-	c, err = NewConsumer("amqp://guest:guest@localhost:5672/", "crop_router1", "direct", "image_cropper1", "cropper", "c1")
+	c, err = NewConsumer("amqp://guest:guest@localhost:5672/", "crop_router1", "direct", "image_cropper", "cropper", "c1")
 	failOnError(err, "Failed to connect to RabbitMQ")
 	defer c.conn.Close()
 
